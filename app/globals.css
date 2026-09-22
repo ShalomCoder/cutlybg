@@ -306,6 +306,17 @@ img {
   border-color: var(--border-strong);
 }
 
+.btn--soft {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 1px solid rgba(108, 92, 231, 0.22);
+}
+
+.btn--soft:hover {
+  background: #e9e6fb;
+  border-color: rgba(108, 92, 231, 0.38);
+}
+
 .btn--full {
   width: 100%;
 }
@@ -502,6 +513,21 @@ img {
 
 .actions__row .btn {
   flex: 1;
+}
+
+/* Enlarge step between the result chip and the download button */
+.enhance {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.enhance__label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 /* ---------- Error state ---------- */
