@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Status = "idle" | "processing" | "upscaling" | "done" | "error";
-type ErrorPhase = "remove" | "upscale";
+type Status = "idle" | "processing" | "done" | "error";
 
 const ACCEPTED_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
 const ACCEPTED_EXT = /\.(png|jpe?g|webp)$/i;
@@ -26,16 +25,33 @@ function baseName(name: string) {
   return name.replace(/\.[^.]+$/, "").slice(0, 60) || "image";
 }
 
+type DownloadFormat = "png" | "webp" | "jpg";
+
+function isDownloadFormat(value: string): value is DownloadFormat {
+  return value === "png" || value === "webp" || value === "jpg";
+}
+
+const FORMAT_EXT: Record<DownloadFormat, string> = {
+  png: "png",
+  webp: "webp",
+  jpg: "jpg",
+};
+
+const FORMAT_MIME: Record<DownloadFormat, string> = {
+  png: "image/png",
+  webp: "image/webp",
+  jpg: "image/jpeg",
+};
+
 export default function CutlyBGApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [file, setFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
-  const [scale, setScale] = useState<"2" | "4" | null>(null);
-  const [errorPhase, setErrorPhase] = useState<ErrorPhase>("remove");
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("png");
   const dragDepth = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -68,46 +84,6 @@ export default function CutlyBGApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const submit = useCallback(
-    async (
-      url: string,
-      chosen: File,
-      extraFields: Record<string, string> = {},
-    ) => {
-      const form = new FormData();
-      form.append("file", chosen);
-      for (const [key, value] of Object.entries(extraFields)) {
-        form.append(key, value);
-      }
-
-      const [response] = await Promise.all([
-        fetch(url, { method: "POST", body: form }),
-        new Promise((resolve) => setTimeout(resolve, 700)),
-      ]);
-
-      if (!response.ok) {
-        let message = "Processing failed. Please try again.";
-        try {
-          const payload = (await response.json()) as { error?: string };
-          if (payload.error) message = payload.error;
-        } catch {
-          // fall back to the default message
-        }
-        throw new Error(message);
-      }
-
-      return response.blob();
-    },
-    [],
-  );
-
-  const setNewResult = useCallback((blob: Blob) => {
-    setResultUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(blob);
-    });
-  }, []);
-
   const process = useCallback(
     async (chosen: File) => {
       if (busy.current) return;
@@ -115,7 +91,6 @@ export default function CutlyBGApp() {
       if (problem) {
         setFileName(chosen.name);
         setError(problem);
-        setErrorPhase("remove");
         setResultUrl(null);
         setStatus("error");
         return;
@@ -125,8 +100,6 @@ export default function CutlyBGApp() {
       setFile(chosen);
       setFileName(chosen.name);
       setError(null);
-      setErrorPhase("remove");
-      setScale(null);
       setResultUrl(null);
       setOriginalUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
@@ -134,10 +107,32 @@ export default function CutlyBGApp() {
       });
       setStatus("processing");
 
+      const form = new FormData();
+      form.append("file", chosen);
+
       try {
-        const blob = await submit("/api/remove-bg", chosen);
+        const [response] = await Promise.all([
+          fetch("/api/remove-bg", { method: "POST", body: form }),
+          new Promise((resolve) => setTimeout(resolve, 700)),
+        ]);
+
+        if (!response.ok) {
+          let message = "Background removal failed. Please try again.";
+          try {
+            const payload = (await response.json()) as { error?: string };
+            if (payload.error) message = payload.error;
+          } catch {
+            // fall back to the default message
+          }
+          throw new Error(message);
+        }
+
+        const blob = await response.blob();
         if (!mounted.current) return;
-        setNewResult(blob);
+        setResultUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(blob);
+        });
         setStatus("done");
       } catch (err) {
         if (!mounted.current) return;
@@ -151,43 +146,7 @@ export default function CutlyBGApp() {
         busy.current = false;
       }
     },
-    [submit, setNewResult],
-  );
-
-  const upscale = useCallback(
-    async (choice: "2" | "4") => {
-      if (!resultUrl || busy.current) return;
-
-      setError(null);
-      setErrorPhase("upscale");
-      setScale(choice);
-      setStatus("upscaling");
-      busy.current = true;
-
-      try {
-        const blob = await fetch(resultUrl).then((r) => r.blob());
-        const cutout = new File(
-          [blob],
-          `${baseName(fileName)}-no-bg.png`,
-          { type: "image/png" },
-        );
-        const upscaled = await submit("/api/upscale", cutout, { scale: choice });
-        if (!mounted.current) return;
-        setNewResult(upscaled);
-        setStatus("done");
-      } catch (err) {
-        if (!mounted.current) return;
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Something unexpected went wrong. Please try again.",
-        );
-        setStatus("error");
-      } finally {
-        busy.current = false;
-      }
-    },
-    [resultUrl, fileName, submit, setNewResult],
+    [],
   );
 
   const reset = useCallback(() => {
@@ -201,9 +160,8 @@ export default function CutlyBGApp() {
     });
     setFile(null);
     setFileName("");
-    setScale(null);
-    setErrorPhase("remove");
     setError(null);
+    setDownloadFormat("png");
     setStatus("idle");
   }, []);
 
@@ -234,24 +192,69 @@ export default function CutlyBGApp() {
 
   const download = useCallback(() => {
     if (!resultUrl) return;
-    const anchor = document.createElement("a");
-    anchor.href = resultUrl;
-    anchor.download = `${baseName(fileName)}-no-bg${scale ? `-${scale}` : ""}.png`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-  }, [resultUrl, fileName, scale]);
+
+    const base = `${baseName(fileName)}-no-bg`;
+    const save = (href: string, ext: string) => {
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `${base}.${ext}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    };
+
+    // PNG is the result as-is; WEBP/JPG are converted on a canvas so the
+    // download never needs a server round trip.
+    if (downloadFormat === "png") {
+      save(resultUrl, "png");
+      return;
+    }
+
+    const image = new Image();
+    image.onerror = () => save(resultUrl, "png");
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx || typeof canvas.toBlob !== "function") {
+        save(resultUrl, "png");
+        return;
+      }
+      if (downloadFormat === "jpg") {
+        // JPEG has no alpha channel: flatten transparency onto white.
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.drawImage(image, 0, 0);
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            save(resultUrl, "png");
+            return;
+          }
+          const url = URL.createObjectURL(blob);
+          try {
+            save(url, FORMAT_EXT[downloadFormat]);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        },
+        FORMAT_MIME[downloadFormat],
+        0.92,
+      );
+    };
+    image.src = resultUrl;
+  }, [resultUrl, fileName, downloadFormat]);
 
   const statusLabel =
     status === "processing"
       ? "Removing background…"
-      : status === "upscaling"
-        ? `Upscaling image ${scale}×…`
-        : status === "done"
-          ? "Done"
-          : status === "error"
-            ? "Something went wrong"
-            : null;
+      : status === "done"
+        ? "Background removed"
+        : status === "error"
+          ? "Something went wrong"
+          : null;
 
   return (
     <main className="shell__main">
@@ -277,8 +280,7 @@ export default function CutlyBGApp() {
         </div>
         <h1 className="hero__title">Remove backgrounds. Keep what matters.</h1>
         <p className="hero__tagline">
-          Drop an image, watch the background disappear, upscale it, and
-          download a clean PNG.
+          Drop an image, watch the background disappear, download a clean PNG.
         </p>
       </header>
 
@@ -306,7 +308,7 @@ export default function CutlyBGApp() {
             role="button"
             tabIndex={0}
             aria-label="Upload an image. Drag and drop a PNG, JPG, or WEBP, or press Enter to browse."
-            onClick={(e) => {
+onClick={(e) => {
               if ((e.target as HTMLElement).closest("button")) return;
               openPicker();
             }}
@@ -352,10 +354,7 @@ export default function CutlyBGApp() {
           </div>
         )}
 
-        {(status === "processing" ||
-          status === "upscaling" ||
-          status === "done" ||
-          status === "error") && (
+        {(status === "processing" || status === "done" || status === "error") && (
           <div className="panels">
             <div className="panel">
               <div className="panel__label">Original</div>
@@ -371,25 +370,19 @@ export default function CutlyBGApp() {
             <div className="panel">
               <div className="panel__label">Result</div>
 
-              {(status === "processing" || status === "upscaling") && (
+              {status === "processing" && (
                 <div className="panel__body">
                   <div className="loader" role="status" aria-live="polite">
                     <div className="loader__ring" aria-hidden="true" />
                     <p className="loader__title">
-                      {status === "processing"
-                        ? "Removing background"
-                        : `Upscaling image ${scale}×`}
+                      Removing background
                       <span className="loader__dots" aria-hidden="true">
                         <span />
                         <span />
                         <span />
                       </span>
                     </p>
-                    <p className="loader__sub">
-                      {status === "processing"
-                        ? "This usually takes a few seconds."
-                        : "This can take up to a minute. Your image isn&rsquo;t stored."}
-                    </p>
+                    <p className="loader__sub">This usually takes a few seconds.</p>
                   </div>
                 </div>
               )}
@@ -422,32 +415,18 @@ export default function CutlyBGApp() {
                         <line x1="12" y1="16" x2="12.01" y2="16" />
                       </svg>
                     </span>
-                    <p className="error-box__title">
-                      {errorPhase === "upscale"
-                        ? "Couldn&rsquo;t upscale the image"
-                        : "Couldn&rsquo;t remove the background"}
-                    </p>
+                    <p className="error-box__title">Couldn&rsquo;t remove the background</p>
                     <p className="error-box__msg">{error}</p>
                     <div className="actions">
                       <div className="actions__row">
-                        {errorPhase === "upscale" ? (
+                        {file && (
                           <button
                             type="button"
                             className="btn btn--primary"
-                            onClick={() => upscale(scale ?? "2")}
+                            onClick={() => process(file)}
                           >
                             Try again
                           </button>
-                        ) : (
-                          file && (
-                            <button
-                              type="button"
-                              className="btn btn--primary"
-                              onClick={() => process(file)}
-                            >
-                              Try again
-                            </button>
-                          )
                         )}
                         <button type="button" className="btn btn--ghost" onClick={reset}>
                           Choose another image
@@ -471,46 +450,44 @@ export default function CutlyBGApp() {
                     >
                       <path d="M20 6 9 17l-5-5" />
                     </svg>
-                    {scale ? `Upscaled ${scale}×` : "Background removed"}
+                    Background removed
                   </span>
-
-                  {!scale && (
-                    <div className="enhance">
-                      <span className="enhance__label">Improve quality</span>
-                      <div className="actions__row">
-                        <button
-                          type="button"
-                          className="btn btn--soft"
-                          onClick={() => upscale("2")}
-                        >
-                          Upscale 2×
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--soft"
-                          onClick={() => upscale("4")}
-                        >
-                          Upscale 4×
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <button type="button" className="btn btn--primary btn--full" onClick={download}>
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+                  <div className="download-bar">
+                    <label className="sr-only" htmlFor="download-format">
+                      Download format
+                    </label>
+                    <select
+                      id="download-format"
+                      className="download-bar__select"
+                      value={downloadFormat}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (isDownloadFormat(value)) setDownloadFormat(value);
+                      }}
                     >
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    Download PNG
-                  </button>
+                      <option value="png">PNG</option>
+                      <option value="webp">WEBP</option>
+                      <option value="jpg">JPG</option>
+                    </select>
+                    <button type="button" className="btn btn--primary" onClick={download}>
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Download
+                    </button>
+                  </div>
+                  <p className="download-bar__hint">
+                    PNG and WEBP keep transparency; JPG fills it with white.
+                  </p>
                   <button type="button" className="btn btn--ghost btn--full" onClick={reset}>
                     Remove another background
                   </button>
