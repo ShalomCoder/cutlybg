@@ -1,8 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ensureModel,
+  removeBackgroundOnDevice,
+  type ProgressState,
+} from "@/lib/background-removal";
+import { MODELS, type ModelKind } from "@/lib/models";
 
 type Status = "idle" | "processing" | "done" | "error";
+type Mode = "device" | "server";
 
 const ACCEPTED_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
 const ACCEPTED_EXT = /\.(png|jpe?g|webp)$/i;
@@ -25,6 +32,16 @@ function baseName(name: string) {
   return name.replace(/\.[^.]+$/, "").slice(0, 60) || "image";
 }
 
+function isAbort(err: unknown) {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error
+    ? err.message
+    : "Something unexpected went wrong. Please try again.";
+}
+
 type DownloadFormat = "png" | "webp" | "jpg";
 
 function isDownloadFormat(value: string): value is DownloadFormat {
@@ -43,8 +60,15 @@ const FORMAT_MIME: Record<DownloadFormat, string> = {
   jpg: "image/jpeg",
 };
 
+const MODE_HINT: Record<Mode, string> = {
+  device:
+    "Private — photos are processed locally in your browser and never uploaded.",
+  server: "Processed on our server — faster, but your photo is uploaded.",
+};
+
 export default function CutlyBGApp() {
   const [status, setStatus] = useState<Status>("idle");
+  const [mode, setMode] = useState<Mode>("device");
   const [file, setFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
@@ -52,10 +76,16 @@ export default function CutlyBGApp() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("png");
+  const [devicePath, setDevicePath] = useState(false);
+  const [modelProgress, setModelProgress] = useState<ProgressState | null>(null);
+  const [enhanced, setEnhanced] = useState(false);
+  const [modeNotice, setModeNotice] = useState<string | null>(null);
   const dragDepth = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const busy = useRef(false);
+  const modelAbort = useRef<AbortController | null>(null);
+  const warmed = useRef(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -76,6 +106,24 @@ export default function CutlyBGApp() {
     };
   }, []);
 
+  // Warm up the fast model after the first interaction so the first
+  // on-device cutout usually doesn't wait on a download. Never blocks input.
+  useEffect(() => {
+    if (mode !== "device" || warmed.current) return;
+    const warm = () => {
+      if (warmed.current) return;
+      warmed.current = true;
+      ensureModel("modnet").catch(() => {});
+    };
+    const handle = () => warm();
+    window.addEventListener("pointerdown", handle, { once: true });
+    window.addEventListener("keydown", handle, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", handle);
+      window.removeEventListener("keydown", handle);
+    };
+  }, [mode]);
+
   useEffect(() => {
     return () => {
       if (originalUrl) URL.revokeObjectURL(originalUrl);
@@ -84,8 +132,78 @@ export default function CutlyBGApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const runServer = useCallback(async (chosen: File): Promise<Blob> => {
+    const form = new FormData();
+    form.append("file", chosen);
+
+    const [response] = await Promise.all([
+      fetch("/api/remove-bg", { method: "POST", body: form }),
+      new Promise((resolve) => setTimeout(resolve, 700)),
+    ]);
+
+    if (!response.ok) {
+      let message = "Background removal failed. Please try again.";
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload.error) message = payload.error;
+      } catch {
+        // fall back to the default message
+      }
+      throw new Error(message);
+    }
+
+    return response.blob();
+  }, []);
+
+  const runDevice = useCallback(
+    async (chosen: File, kind: ModelKind): Promise<Blob> => {
+      modelAbort.current?.abort();
+      const controller = new AbortController();
+      modelAbort.current = controller;
+      setDevicePath(true);
+      setModelProgress({ phase: "download", loaded: 0, total: MODELS[kind].sizeBytes });
+
+      let lastTick = 0;
+      const onProgress = (next: ProgressState) => {
+        const now = Date.now();
+        if (now - lastTick < 90) return;
+        lastTick = now;
+        setModelProgress(next);
+      };
+
+      try {
+        return await removeBackgroundOnDevice(chosen, kind, onProgress, controller.signal);
+      } finally {
+        if (modelAbort.current === controller) modelAbort.current = null;
+        setDevicePath(false);
+        setModelProgress(null);
+      }
+    },
+    [],
+  );
+
+  const reset = useCallback(() => {
+    modelAbort.current?.abort();
+    setOriginalUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setResultUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setFile(null);
+    setFileName("");
+    setError(null);
+    setDownloadFormat("png");
+    setEnhanced(false);
+    setModeNotice(null);
+    setModelProgress(null);
+    setStatus("idle");
+  }, []);
+
   const process = useCallback(
-    async (chosen: File) => {
+    async (chosen: File, opts?: { kind?: ModelKind }) => {
       if (busy.current) return;
       const problem = validateFile(chosen);
       if (problem) {
@@ -101,33 +219,40 @@ export default function CutlyBGApp() {
       setFileName(chosen.name);
       setError(null);
       setResultUrl(null);
+      setEnhanced(false);
+      setModeNotice(null);
+      setModelProgress(null);
       setOriginalUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(chosen);
       });
       setStatus("processing");
 
-      const form = new FormData();
-      form.append("file", chosen);
+      const useDevice = mode === "device";
 
       try {
-        const [response] = await Promise.all([
-          fetch("/api/remove-bg", { method: "POST", body: form }),
-          new Promise((resolve) => setTimeout(resolve, 700)),
-        ]);
+        let blob: Blob;
 
-        if (!response.ok) {
-          let message = "Background removal failed. Please try again.";
+        if (useDevice) {
           try {
-            const payload = (await response.json()) as { error?: string };
-            if (payload.error) message = payload.error;
-          } catch {
-            // fall back to the default message
+            blob = await runDevice(chosen, opts?.kind ?? "modnet");
+          } catch (err) {
+            if (isAbort(err)) {
+              reset();
+              return;
+            }
+            // The on-device pipeline failed: fall back to the server path
+            // rather than dead-ending the user.
+            setMode("server");
+            setModeNotice(
+              "On-device processing isn't available right now, so this image was processed on the server instead.",
+            );
+            blob = await runServer(chosen);
           }
-          throw new Error(message);
+        } else {
+          blob = await runServer(chosen);
         }
 
-        const blob = await response.blob();
         if (!mounted.current) return;
         setResultUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev);
@@ -136,33 +261,47 @@ export default function CutlyBGApp() {
         setStatus("done");
       } catch (err) {
         if (!mounted.current) return;
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Something unexpected went wrong. Please try again.",
-        );
+        setError(errorMessage(err));
         setStatus("error");
       } finally {
         busy.current = false;
+        setModelProgress(null);
       }
     },
-    [],
+    [mode, reset, runDevice, runServer],
   );
 
-  const reset = useCallback(() => {
-    setOriginalUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-    setResultUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-    setFile(null);
-    setFileName("");
+  const enhance = useCallback(async () => {
+    if (!file || enhanced || busy.current) return;
+    busy.current = true;
     setError(null);
-    setDownloadFormat("png");
-    setStatus("idle");
+    setModeNotice(null);
+    setStatus("processing");
+
+    try {
+      const blob = await runDevice(file, "isnet");
+      if (!mounted.current) return;
+      setResultUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setEnhanced(true);
+      setStatus("done");
+    } catch (err) {
+      if (isAbort(err)) {
+        setStatus("done");
+        return;
+      }
+      setModeNotice("Couldn't refresh with the HD model — showing the previous result.");
+      setStatus("done");
+    } finally {
+      busy.current = false;
+      setModelProgress(null);
+    }
+  }, [file, enhanced, runDevice]);
+
+  const cancelProcessing = useCallback(() => {
+    modelAbort.current?.abort();
   }, []);
 
   const openPicker = useCallback(() => {
@@ -247,6 +386,10 @@ export default function CutlyBGApp() {
     image.src = resultUrl;
   }, [resultUrl, fileName, downloadFormat]);
 
+  const progressPercent = modelProgress?.total
+    ? Math.min(100, Math.round(((modelProgress.loaded ?? 0) / modelProgress.total) * 100))
+    : 0;
+
   const statusLabel =
     status === "processing"
       ? "Removing background…"
@@ -303,55 +446,86 @@ export default function CutlyBGApp() {
         />
 
         {status === "idle" && (
-          <div
-            className={`dropzone${isDragging ? " is-dragging" : ""}`}
-            role="button"
-            tabIndex={0}
-            aria-label="Upload an image. Drag and drop a PNG, JPG, or WEBP, or press Enter to browse."
-onClick={(e) => {
-              if ((e.target as HTMLElement).closest("button")) return;
-              openPicker();
-            }}
-            onKeyDown={onKeyDown}
-            onDragEnter={(e) => {
-              e.preventDefault();
-              dragDepth.current += 1;
-              setIsDragging(true);
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "copy";
-            }}
-            onDragLeave={(e) => {
-              e.preventDefault();
-              dragDepth.current -= 1;
-              if (dragDepth.current <= 0) {
-                dragDepth.current = 0;
-                setIsDragging(false);
-              }
-            }}
-            onDrop={onDrop}
-          >
-            <span className="dropzone__icon" aria-hidden="true">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+          <>
+            <div
+              className={`dropzone${isDragging ? " is-dragging" : ""}`}
+              role="button"
+              tabIndex={0}
+              aria-label="Upload an image. Drag and drop a PNG, JPG, or WEBP, or press Enter to browse."
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest("button")) return;
+                openPicker();
+              }}
+              onKeyDown={onKeyDown}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                dragDepth.current += 1;
+                setIsDragging(true);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                dragDepth.current -= 1;
+                if (dragDepth.current <= 0) {
+                  dragDepth.current = 0;
+                  setIsDragging(false);
+                }
+              }}
+              onDrop={onDrop}
+            >
+              <span className="dropzone__icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="m21 15-5-5L5 21" />
+                </svg>
+              </span>
+              <p className="dropzone__title">Drop an image here</p>
+              <button type="button" className="btn btn--primary" onClick={openPicker}>
+                Upload an image
+              </button>
+              <p className="dropzone__note">PNG, JPG or WEBP · up to 99 MB</p>
+            </div>
+
+            <div className="mode-toggle">
+              <div
+                className="segmented"
+                role="radiogroup"
+                aria-label="Processing mode"
               >
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <path d="m21 15-5-5L5 21" />
-              </svg>
-            </span>
-            <p className="dropzone__title">Drop an image here</p>
-            <button type="button" className="btn btn--primary" onClick={openPicker}>
-              Upload an image
-            </button>
-            <p className="dropzone__note">PNG, JPG or WEBP · up to 99 MB</p>
-          </div>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === "device"}
+                  className="segmented__option"
+                  onClick={() => setMode("device")}
+                >
+                  On device
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === "server"}
+                  className="segmented__option"
+                  onClick={() => setMode("server")}
+                >
+                  Server
+                </button>
+              </div>
+              <p className="mode-toggle__hint">{MODE_HINT[mode]}</p>
+              {modeNotice && <p className="mode-notice">{modeNotice}</p>}
+            </div>
+          </>
         )}
 
         {(status === "processing" || status === "done" || status === "error") && (
@@ -372,18 +546,67 @@ onClick={(e) => {
 
               {status === "processing" && (
                 <div className="panel__body">
-                  <div className="loader" role="status" aria-live="polite">
-                    <div className="loader__ring" aria-hidden="true" />
-                    <p className="loader__title">
-                      Removing background
-                      <span className="loader__dots" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                    </p>
-                    <p className="loader__sub">This usually takes a few seconds.</p>
-                  </div>
+                  {modelProgress && modelProgress.phase === "download" ? (
+                    <div className="model-progress" role="status" aria-live="polite">
+                      <p className="model-progress__label">
+                        Loading AI model
+                        <span className="loader__dots" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+                      </p>
+                      <div className="model-progress__track">
+                        <div
+                          className={`model-progress__fill${
+                            modelProgress.total ? "" : " model-progress__fill--indeterminate"
+                          }`}
+                          style={
+                            modelProgress.total ? { width: `${progressPercent}%` } : undefined
+                          }
+                        />
+                      </div>
+                      <p className="model-progress__sub">
+                        {formatMegabytes(modelProgress.loaded ?? 0)} of{" "}
+                        {formatMegabytes(modelProgress.total ?? 0)} MB
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn--ghost model-progress__cancel"
+                        onClick={cancelProcessing}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : devicePath ? (
+                    <div className="loader" role="status" aria-live="polite">
+                      <div className="loader__ring" aria-hidden="true" />
+                      <p className="loader__title">
+                        Removing background
+                        <span className="loader__dots" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+                      </p>
+                      <p className="loader__sub">
+                        Running on your device — nothing is uploaded.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="loader" role="status" aria-live="polite">
+                      <div className="loader__ring" aria-hidden="true" />
+                      <p className="loader__title">
+                        Removing background
+                        <span className="loader__dots" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+                      </p>
+                      <p className="loader__sub">This usually takes a few seconds.</p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -488,6 +711,32 @@ onClick={(e) => {
                   <p className="download-bar__hint">
                     PNG and WEBP keep transparency; JPG fills it with white.
                   </p>
+
+                  {mode === "device" && !enhanced && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--full"
+                        onClick={enhance}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M12 3v3m0 12v3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12M3 12h3m12 0h3M5.64 18.36l2.12-2.12m8.48-8.48 2.12-2.12" />
+                        </svg>
+                        Enhance quality
+                      </button>
+                      <p className="enhance-bar__note">{MODELS.isnet.downloadLabel}</p>
+                    </>
+                  )}
+
+                  {modeNotice && <p className="mode-notice">{modeNotice}</p>}
+
                   <button type="button" className="btn btn--ghost btn--full" onClick={reset}>
                     Remove another background
                   </button>
@@ -509,4 +758,9 @@ onClick={(e) => {
       </footer>
     </main>
   );
+}
+
+function formatMegabytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0.0";
+  return (bytes / (1024 * 1024)).toFixed(1);
 }

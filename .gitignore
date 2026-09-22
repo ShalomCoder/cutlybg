@@ -37,6 +37,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# generated onnxruntime-web wasm assets (copied by postinstall)
+/public/ort/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

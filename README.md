@@ -5,19 +5,41 @@ Remove backgrounds. Keep what matters.
 Live at [cutlybg.vercel.app](https://cutlybg.vercel.app).
 
 CutlyBG is a small, focused web app for removing image backgrounds. Upload an
-image, and it returns a clean transparent PNG ready to download.
+image, watch the background disappear, and download a clean transparent PNG.
 
 - Drag & drop or pick a PNG, JPG, or WEBP
-- Background removal via the [BGNinja API](https://bgninja.com/api.html)
+- **On-device mode (default):** background removal runs in your browser with
+  [ONNX Runtime Web](https://www.npmjs.com/package/onnxruntime-web) — photos
+  never leave your device
+- **Server mode:** removal via the [BGNinja API](https://bgninja.com/api.html)
+  for a faster, server-side cutout
+- **Enhance quality:** re-run the cutout with the higher-quality ISNet model
+  (one-time ~84 MB download, cached) for hair edges and general objects
 - Results shown on a checkerboard transparency background
-- Download as a transparent PNG
+- Download as a transparent PNG, WEBP, or JPG (JPG flattens onto white)
 
 ## What powers it
 
 - **Next.js (App Router)** with React and TypeScript
-- Background removal runs through a **server-side API route**
-  (`app/api/remove-bg/route.ts`) so no provider credentials ever reach the
-  browser
+- **On-device pipeline** (`lib/background-removal.ts`): a thin wrapper that
+  streams an ONNX model from Hugging Face, runs it through `onnxruntime-web`
+  (WebGPU with a WASM fallback), applies the predicted mask, and composites a
+  transparent PNG — all client-side. No provider credentials or images ever
+  leave the browser.
+- **Server fallback** (`app/api/remove-bg/route.ts`) proxies BGNinja so no
+  provider credentials reach the browser. If the on-device pipeline fails, the
+  UI automatically falls back to server mode with a notice.
+
+### Models
+
+| Model  | Source                                                                             | License    | Size  | Input |
+| ------ | ---------------------------------------------------------------------------------- | ---------- | ----- | ----- |
+| MODNet | [huggingface.co/Xenova/modnet](https://huggingface.co/Xenova/modnet)               | Apache-2.0 | 6 MB  | 512²  |
+| ISNet  | [huggingface.co/imgly/isnet-general-onnx](https://huggingface.co/imgly/isnet-general-onnx) | MIT | 84 MB | 1024² |
+
+Model bytes are cached in the browser (Cache Storage), so repeat visits skip
+the download. ONNX Runtime Web ships its `ort-wasm*.wasm` assets from
+`public/ort/`, copied there by a `postinstall` script.
 
 ## Getting started
 
@@ -45,3 +67,6 @@ npm run build    # production build
 npm run start    # run the production build
 npm run lint     # run ESLint
 ```
+
+`npm install` also runs `postinstall`, which copies the ONNX Runtime WASM
+binaries into `public/ort/`.

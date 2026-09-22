@@ -6,10 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node scripts/copy-ort-wasm.mjs"
   },
   "dependencies": {
+    "@fontsource/momo-trust-display": "^5.3.0",
     "next": "16.3.5",
+    "onnxruntime-web": "^1.30.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
