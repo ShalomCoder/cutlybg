@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmFiles = readdirSync(
   join(root, "node_modules", "onnxruntime-web", "dist"),
-).filter((name) => name.endsWith(".wasm"));
+).filter((name) => name.startsWith("ort-wasm-") && /\.(wasm|mjs)$/.test(name));
 
 const outDir = join(root, "public", "ort");
 mkdirSync(outDir, { recursive: true });
