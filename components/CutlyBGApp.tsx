@@ -956,7 +956,23 @@ export default function CutlyBGApp() {
 
       <footer className="footer">
         <p className="footer__text">
-          Built by <strong>Radicon Studios</strong>
+          Built by{" "}
+          <a
+            className="footer__brand"
+            href="https://radicon.vercel.app"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Radicon Studios"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              className="footer__logo"
+              src="/radicon-logo.png"
+              alt="Radicon Studios"
+              loading="lazy"
+              decoding="async"
+            />
+          </a>
         </p>
       </footer>
     </main>

@@ -760,6 +760,20 @@ img {
   font-weight: 700;
   color: var(--text);
   margin: 0;
+  line-height: 1.4;
+}
+
+.footer__brand {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 3px;
+  line-height: 0;
+}
+
+.footer__logo {
+  width: 128px;
+  height: auto;
+  border-radius: 6px;
 }
 
 /* ---------- Responsive ---------- */
