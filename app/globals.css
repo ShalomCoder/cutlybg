@@ -673,6 +673,28 @@ img {
   margin: 0;
 }
 
+/* ---------- Upscale controls ---------- */
+
+.refine-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.refine-row .segmented {
+  flex: 1.6;
+}
+
+.refine-row__upscale {
+  flex: 1;
+}
+
+.upscale-chip {
+  color: #4848c7;
+  background: #eef0ff;
+  border-color: #dcdffa;
+}
+
 /* ---------- Error state ---------- */
 
 .error-box {

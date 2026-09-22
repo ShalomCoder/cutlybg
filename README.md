@@ -15,6 +15,9 @@ image, watch the background disappear, and download a clean transparent PNG.
   for a faster, server-side cutout
 - **Enhance quality:** re-run the cutout with the higher-quality ISNet model
   (one-time ~84 MB download, cached) for hair edges and general objects
+- **Upscale 2x / 4x:** sharpen and enlarge the result on-device with a tiny
+  (240 KB) super-resolution model — works in both modes, transparent
+  backgrounds stay transparent, capped at a 4096px long edge
 - Results shown on a checkerboard transparency background
 - Download as a transparent PNG, WEBP, or JPG (JPG flattens onto white)
 
@@ -36,10 +39,23 @@ image, watch the background disappear, and download a clean transparent PNG.
 | ------ | ---------------------------------------------------------------------------------- | ---------- | ----- | ----- |
 | MODNet | [huggingface.co/Xenova/modnet](https://huggingface.co/Xenova/modnet)               | Apache-2.0 | 6 MB  | 512²  |
 | ISNet  | [huggingface.co/imgly/isnet-general-onnx](https://huggingface.co/imgly/isnet-general-onnx) | MIT | 84 MB | 1024² |
+| Super-Res | [ONNX Model Zoo — Sub-Pixel CNN](https://huggingface.co/onnxmodelzoo/super-resolution-10) | Apache-2.0 | 240 KB | 224² (→ 672²) |
+
+### On-device upscaling
+
+`lib/upscale.ts` runs the ONNX Model Zoo Sub-Pixel CNN model
+(`public/models/super-resolution-10.onnx`, served same-origin) tile-by-tile to
+sharpen the result's luminance without re-uploading anything. Chroma and alpha
+are upscaled with high-quality smoothing on the same geometry, so transparent
+cutouts stay transparent. The long edge of the result is capped at 4096 px to
+bound browser memory on phones.
 
 Model bytes are cached in the browser (Cache Storage), so repeat visits skip
 the download. ONNX Runtime Web ships its `ort-wasm*.wasm` assets from
-`public/ort/`, copied there by a `postinstall` script.
+`public/ort/`, copied there by a `postinstall` script. The upscaler model
+(`public/models/super-resolution-10.onnx`, Apache-2.0, from the
+[ONNX Model Zoo](https://github.com/onnx/models/tree/main/validated/vision/super_resolution/sub_pixel_cnn_2016))
+is committed to the repo so the same-origin fetch has no external dependency.
 
 ## Getting started
 

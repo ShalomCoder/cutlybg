@@ -1,4 +1,4 @@
-export type ModelKind = "modnet" | "isnet";
+export type ModelKind = "modnet" | "isnet" | "upscaler";
 
 export interface OnnxModel {
   id: ModelKind;
@@ -34,5 +34,16 @@ export const MODELS: Record<ModelKind, OnnxModel> = {
     sizeBytes: 88_152_708,
     sizeLabel: "84 MB",
     inputSize: 1024,
+  },
+  upscaler: {
+    id: "upscaler",
+    name: "Super-Res",
+    tagline: "Sharpens and upscales the result",
+    downloadLabel: "AI upscale · 240 KB one-time",
+    cachedLabel: "Upscaler ready",
+    url: "/models/super-resolution-10.onnx",
+    sizeBytes: 240_078,
+    sizeLabel: "240 KB",
+    inputSize: 224,
   },
 };

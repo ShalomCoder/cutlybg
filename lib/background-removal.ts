@@ -19,8 +19,8 @@ const sessionCache = new Map<
 
 let ortPromise: Promise<typeof import("onnxruntime-web")> | null = null;
 
-function loadOrt() {
-  // Lazy-load only when the user first runs the on-device path.
+export function loadOrt() {
+  // Lazy-load only when the user first runs an on-device path.
   ortPromise ??= import("onnxruntime-web");
   return ortPromise;
 }

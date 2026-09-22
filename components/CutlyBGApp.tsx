@@ -7,6 +7,11 @@ import {
   type ProgressState,
 } from "@/lib/background-removal";
 import { MODELS, type ModelKind } from "@/lib/models";
+import {
+  upscaleOnDevice,
+  type UpscaleFactor,
+  type UpscaleResult,
+} from "@/lib/upscale";
 
 type Status = "idle" | "processing" | "done" | "error";
 type Mode = "device" | "server";
@@ -79,6 +84,10 @@ export default function CutlyBGApp() {
   const [devicePath, setDevicePath] = useState(false);
   const [modelProgress, setModelProgress] = useState<ProgressState | null>(null);
   const [enhanced, setEnhanced] = useState(false);
+  const [upscaleFactor, setUpscaleFactor] = useState<UpscaleFactor>(2);
+  const [upscaled, setUpscaled] = useState<UpscaleResult | null>(null);
+  const [upscaling, setUpscaling] = useState(false);
+  const [prevResultUrl, setPrevResultUrl] = useState<string | null>(null);
   const [modeNotice, setModeNotice] = useState<string | null>(null);
   const dragDepth = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -192,11 +201,18 @@ export default function CutlyBGApp() {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
+    setPrevResultUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     setFile(null);
     setFileName("");
     setError(null);
     setDownloadFormat("png");
     setEnhanced(false);
+    setUpscaleFactor(2);
+    setUpscaled(null);
+    setUpscaling(false);
     setModeNotice(null);
     setModelProgress(null);
     setStatus("idle");
@@ -220,6 +236,13 @@ export default function CutlyBGApp() {
       setError(null);
       setResultUrl(null);
       setEnhanced(false);
+      setUpscaleFactor(2);
+      setUpscaled(null);
+      setUpscaling(false);
+      setPrevResultUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
       setModeNotice(null);
       setModelProgress(null);
       setOriginalUrl((prev) => {
@@ -272,7 +295,7 @@ export default function CutlyBGApp() {
   );
 
   const enhance = useCallback(async () => {
-    if (!file || enhanced || busy.current) return;
+    if (!file || enhanced || upscaled || busy.current) return;
     busy.current = true;
     setError(null);
     setModeNotice(null);
@@ -298,7 +321,64 @@ export default function CutlyBGApp() {
       busy.current = false;
       setModelProgress(null);
     }
-  }, [file, enhanced, runDevice]);
+  }, [file, enhanced, runDevice, upscaled]);
+
+  const runUpscale = useCallback(
+    async (factor: UpscaleFactor) => {
+      if (!resultUrl || upscaled || upscaling || busy.current) return;
+      busy.current = true;
+      setUpscaling(true);
+      setError(null);
+      setModeNotice(null);
+
+      modelAbort.current?.abort();
+      const controller = new AbortController();
+      modelAbort.current = controller;
+
+      let lastTick = 0;
+      const onProgress = (next: ProgressState) => {
+        const now = Date.now();
+        if (now - lastTick < 90) return;
+        lastTick = now;
+        setModelProgress(next);
+      };
+
+      try {
+        const blob = await fetch(resultUrl).then((r) => r.blob());
+        const result = await upscaleOnDevice(blob, factor, onProgress, controller.signal);
+        if (!mounted.current) return;
+        setPrevResultUrl((prev) => (prev ? prev : resultUrl));
+        setResultUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(result.blob);
+        });
+        setUpscaled(result);
+        setStatus("done");
+      } catch (err) {
+        if (isAbort(err)) return;
+        if (!mounted.current) return;
+        setError(errorMessage(err));
+        setUpscaled(null);
+        setStatus("error");
+      } finally {
+        if (modelAbort.current === controller) modelAbort.current = null;
+        busy.current = false;
+        setUpscaling(false);
+        setModelProgress(null);
+      }
+    },
+    [resultUrl, upscaled, upscaling],
+  );
+
+  const revertUpscale = useCallback(() => {
+    if (!upscaled || !prevResultUrl) return;
+    setResultUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return prevResultUrl;
+    });
+    setPrevResultUrl(null);
+    setUpscaled(null);
+  }, [upscaled, prevResultUrl]);
 
   const cancelProcessing = useCallback(() => {
     modelAbort.current?.abort();
@@ -390,8 +470,9 @@ export default function CutlyBGApp() {
     ? Math.min(100, Math.round(((modelProgress.loaded ?? 0) / modelProgress.total) * 100))
     : 0;
 
-  const statusLabel =
-    status === "processing"
+  const statusLabel = upscaling
+    ? "Upscaling result…"
+    : status === "processing"
       ? "Removing background…"
       : status === "done"
         ? "Background removed"
@@ -544,6 +625,58 @@ export default function CutlyBGApp() {
             <div className="panel">
               <div className="panel__label">Result</div>
 
+              {upscaling && (
+                <div className="panel__body">
+                  <div className="model-progress" role="status" aria-live="polite">
+                    <p className="model-progress__label">
+                      {modelProgress?.phase === "inference"
+                        ? `Upscaling tile ${modelProgress.loaded ?? 0} of ${modelProgress.total ?? 0}`
+                        : modelProgress?.phase === "compile"
+                          ? "Preparing upscaler"
+                          : "Loading upscale model"}
+                      <span className="loader__dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    </p>
+                    <div className="model-progress__track">
+                      <div
+                        className={`model-progress__fill${
+                          modelProgress?.phase === "inference" && modelProgress.total
+                            ? ""
+                            : " model-progress__fill--indeterminate"
+                        }`}
+                        style={
+                          modelProgress?.phase === "inference" && modelProgress.total
+                            ? {
+                                width: `${Math.min(100, Math.round(((modelProgress.loaded ?? 0) / modelProgress.total) * 100))}%`,
+                              }
+                            : undefined
+                        }
+                      />
+                    </div>
+                    {modelProgress?.phase === "download" ? (
+                      <p className="model-progress__sub">
+                        {formatMegabytes(modelProgress.loaded ?? 0)} of{" "}
+                        {formatMegabytes(modelProgress.total ?? 0)} MB
+                      </p>
+                    ) : (
+                      <p className="model-progress__sub">
+                        Running on your device — nothing is uploaded.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn--ghost model-progress__cancel"
+                      onClick={cancelProcessing}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {status === "processing" && (
                 <div className="panel__body">
                   {modelProgress && modelProgress.phase === "download" ? (
@@ -610,7 +743,7 @@ export default function CutlyBGApp() {
                 </div>
               )}
 
-              {status === "done" && resultUrl && (
+              {status === "done" && resultUrl && !upscaling && (
                 <div className="panel__body panel__body--checker">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
@@ -660,7 +793,7 @@ export default function CutlyBGApp() {
                 </div>
               )}
 
-              {status === "done" && (
+              {status === "done" && !upscaling && (
                 <div className="actions">
                   <span className="done-chip">
                     <svg
@@ -712,7 +845,7 @@ export default function CutlyBGApp() {
                     PNG and WEBP keep transparency; JPG fills it with white.
                   </p>
 
-                  {mode === "device" && !enhanced && (
+                  {mode === "device" && !enhanced && !upscaled && (
                     <>
                       <button
                         type="button"
@@ -732,6 +865,76 @@ export default function CutlyBGApp() {
                         Enhance quality
                       </button>
                       <p className="enhance-bar__note">{MODELS.isnet.downloadLabel}</p>
+                    </>
+                  )}
+
+                  {upscaled ? (
+                    <>
+                      <span className="done-chip upscale-chip">
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="m7 15 5 5 5-5" />
+                          <path d="M12 20V4" />
+                        </svg>
+                        Upscaled {formatScale(upscaled.scale)}
+                      </span>
+                      <p className="enhance-bar__note">
+                        {upscaled.outW} × {upscaled.outH}px
+                        {upscaled.outW === 4096 || upscaled.outH === 4096
+                          ? " · capped at a 4096px long edge"
+                          : ""}
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--full"
+                        onClick={revertUpscale}
+                      >
+                        Revert to original size
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="refine-row">
+                        <div
+                          className="segmented"
+                          role="radiogroup"
+                          aria-label="Upscale factor"
+                        >
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked={upscaleFactor === 2}
+                            className="segmented__option"
+                            onClick={() => setUpscaleFactor(2)}
+                          >
+                            2x
+                          </button>
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked={upscaleFactor === 4}
+                            className="segmented__option"
+                            onClick={() => setUpscaleFactor(4)}
+                          >
+                            4x
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn--ghost refine-row__upscale"
+                          disabled={upscaling}
+                          onClick={() => runUpscale(upscaleFactor)}
+                        >
+                          Upscale
+                        </button>
+                      </div>
+                      <p className="enhance-bar__note">{MODELS.upscaler.downloadLabel}</p>
                     </>
                   )}
 
@@ -763,4 +966,8 @@ export default function CutlyBGApp() {
 function formatMegabytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0.0";
   return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+function formatScale(scale: number): string {
+  return `×${Number.isInteger(scale) ? scale.toFixed(0) : scale.toFixed(1)}`;
 }
